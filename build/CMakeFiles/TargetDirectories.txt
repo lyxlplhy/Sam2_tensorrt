@@ -1,0 +1,3 @@
+/home/sam2TRT-main/build/CMakeFiles/main.dir
+/home/sam2TRT-main/build/CMakeFiles/edit_cache.dir
+/home/sam2TRT-main/build/CMakeFiles/rebuild_cache.dir
