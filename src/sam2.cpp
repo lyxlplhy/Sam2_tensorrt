@@ -1,4 +1,7 @@
 #include"sam2.h"
+#include <cuda_runtime.h>     // cudaMalloc, cudaMemcpy 等
+#include <device_launch_parameters.h> // blockIdx/threadIdx 定义
+
 
 float sigmoid(float x) {
     return 1.0f / (1.0f + std::exp(-x));
@@ -161,31 +164,14 @@ bool Encoder::Encoder_init(std::string path)
 
 void Encoder::process(cv::Mat& input_image)
 {
-    cv::Mat resized_image;
-    cv::resize(input_image, resized_image, cv::Size(1024, 1024));
-
-    // 2. BGR to RGB
-    cv::cvtColor(resized_image, resized_image, cv::COLOR_BGR2RGB);
-
-    // 3. Convert to float32 and normalize to [0, 1]
-    resized_image.convertTo(resized_image, CV_32FC3, 1.0 / 255.0);
-
-    // 4. Mean and std
-    std::vector<float> mean = {0.485f, 0.456f, 0.406f};
-    std::vector<float> std = {0.229f, 0.224f, 0.225f};
-
-    // 5. HWC to CHW + Normalize
-    std::vector<float> chw_image(3 * 1024 * 1024);
+    this->blob = cv::dnn::blobFromImage(input_image, 1 / 255.0, {1024,1024}, cv::Scalar(0,0,0), true, false,CV_32F);
+    float mean[3] = { 0.485, 0.456, 0.406 };
+    float std[3] = { 0.229, 0.224, 0.225 };
     for (int c = 0; c < 3; ++c) {
-        for (int h = 0; h < 1024; ++h) {
-            for (int w = 0; w < 1024; ++w) {
-                float pixel = resized_image.at<cv::Vec3f>(h, w)[c];
-                chw_image[c * 1024 * 1024 + h * 1024 + w] = (pixel - mean[c]) / std[c];
-            }
-        }
+    cv::Mat channel(this->blob.size[2], this->blob.size[3], CV_32F, this->blob.ptr(0, c)); // 提取第 c 通道
+    channel = (channel - mean[c]) / std[c]; // 合并减去均值和除以标准差的步骤
     }
-    cudaMemcpy(bindings[0], chw_image.data(), buffer_sizes[0], cudaMemcpyHostToDevice);
-
+    cudaMemcpy(bindings[0],  this->blob.ptr<float>(), buffer_sizes[0], cudaMemcpyHostToDevice);
 }
 
 bool Encoder::infer(std::vector<void*>& output_ptrs, std::vector<size_t>& output_sizes)
@@ -204,19 +190,14 @@ bool Encoder::infer(std::vector<void*>& output_ptrs, std::vector<size_t>& output
             output_sizes.push_back(buffer_sizes[i]);
         }
     }
-    // std::vector<float> host_output(output_sizes[0] / sizeof(float)); 
-    // cudaMemcpy(host_output.data(), output_ptrs[0], output_sizes[0], cudaMemcpyDeviceToHost);
-    // for (int i=0;i<host_output.size();++i)
-    // {
-    //     std::cout<<host_output[i]<<std::endl;
-    // }
-
     return true;
 }
 
 
-void Decoder::process(int ori_w,int ori_h,std::vector<float> boxes,std::vector<void*>& output_ptrs, std::vector<size_t>& output_sizes)
+void Decoder::process(int ori_w,int ori_h,std::vector<float> boxes,std::vector<void*>& output_ptrs, std::vector<size_t>& output_sizes,bool muti)
 {
+    if(muti)
+    {
     for(int i=0;i<boxes.size();++i)
     {
         if(i%2==0){
@@ -227,18 +208,10 @@ void Decoder::process(int ori_w,int ori_h,std::vector<float> boxes,std::vector<v
         }
     }
     std::vector<float> point_labels = { 2,3 };
-
     std::vector<float> mask_input(1 * 1 * 256 * 256, 0.0f);
     std::vector<float> has_mask_input = { 0.0f };
     std::vector<float> frame_size = { 1024.0, 1024.0 };
-
     std::vector<float> host_output(output_sizes[0] / sizeof(float)); 
-    cudaMemcpy(host_output.data(), output_ptrs[0], output_sizes[0], cudaMemcpyDeviceToHost);
-    for (int i=0;i<host_output.size();++i)
-    {
-        std::cout<<host_output[i]<<std::endl;
-    }
-
     cudaMemcpy(bindings[0], output_ptrs[0], buffer_sizes[0], cudaMemcpyHostToDevice);
     cudaMemcpy(bindings[1], output_ptrs[2], buffer_sizes[1], cudaMemcpyHostToDevice);
     cudaMemcpy(bindings[2], output_ptrs[1], buffer_sizes[2], cudaMemcpyHostToDevice);
@@ -247,11 +220,25 @@ void Decoder::process(int ori_w,int ori_h,std::vector<float> boxes,std::vector<v
     cudaMemcpy(bindings[5], mask_input.data(), buffer_sizes[5], cudaMemcpyHostToDevice);
     cudaMemcpy(bindings[6], has_mask_input.data(), buffer_sizes[6], cudaMemcpyHostToDevice);
     cudaMemcpy(bindings[7], frame_size.data(), buffer_sizes[7], cudaMemcpyHostToDevice);
+    }
+    else{
+        for(int i=0;i<boxes.size();++i)
+    {
+        if(i%2==0){
+            boxes[i]=boxes[i]/ori_w*1024;
+        }
+        else{
+            boxes[i]=boxes[i]/ori_h*1024;
+        }
+    }
+        cudaMemcpy(bindings[3], boxes.data(), buffer_sizes[3], cudaMemcpyHostToDevice);
+    }
 }
 
 
 bool Decoder::infer()
 {
+    this->output_data.clear();
     if (!context->enqueueV2(bindings.data(), 0, nullptr)) {
         std::cerr << "Failed to run inference." << std::endl;
         return false;
@@ -260,76 +247,57 @@ bool Decoder::infer()
         if (!engine->bindingIsInput(i)) {
             size_t element_count = buffer_sizes[i] / sizeof(float);
             std::vector<float> output(element_count);
-
             // 拷贝 GPU -> CPU
             cudaMemcpy(output.data(), bindings[i], buffer_sizes[i], cudaMemcpyDeviceToHost);
-         
             this->output_data.push_back(std::move(output));
         }
     }
     return true;
 }
 
-cv::Mat Decoder::postprecess(int ori_w, int ori_h) {
-    std::vector<float> output=this->output_data[1];
-    cv::Mat image(256, 256, CV_32F, output.data());
-    cv::Mat resized;
+cv::Mat Decoder::postprecess(int &ori_w, int &ori_h) {
+   
+    const std::vector<float>& output = this->output_data[1];
+    cv::Mat image(256, 256, CV_32F, const_cast<float*>(output.data()));
     cv::resize(image, resized, cv::Size(ori_w, ori_h));
-
-    cv::Mat sigmoid_output(ori_h, ori_w, CV_8U);
-    for (int i = 0; i < ori_h; ++i) {
-        for (int j = 0; j < ori_w; ++j) {
-            float val = resized.at<float>(i, j);
-            float s = sigmoid(val);
-            uchar pixel = static_cast<uchar>(std::min(255.0f, std::max(0.0f, s * 255.0f)));
-            sigmoid_output.at<uchar>(i, j) = pixel;
-        }
-    }
-
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(sigmoid_output, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-
-    cv::Mat black_image = cv::Mat::zeros(ori_h, ori_w, CV_8UC3);
-    cv::drawContours(black_image, contours, -1, cv::Scalar(0, 0, 255), 2);
-    cv::imwrite("1.jpg",black_image);
-    return black_image;
+    resized.convertTo(binary_mask, CV_8U, 255.0);  // scale float to [0,255]   
+    cv::threshold(binary_mask, binary_mask, 0, 255, cv::THRESH_BINARY); 
+   
+    return binary_mask;
 }
 
 Sam2::Sam2(std::string path1,std::string path2)
 {
     this->encoder.Encoder_init(path1);
     this->decoder.Decoder_init(path2);
+    this->img_masks.reserve(5);  
 }
 
-
-void Sam2::Sam2_encoder_process(cv::Mat& input_image)
-{   
-    this->ori_w=input_image.cols;
-    this->ori_h=input_image.rows;
-    this->encoder.process(input_image);
-}
-
-void Sam2::Sam2_encoder_infer()
-{   
-    this->encoder.infer(this->output_ptrs,this->output_sizes);
-}
-
-void Sam2::Sam2_decoder_process()
-{
-    this->decoder.process(this->ori_w,this->ori_h,this->boxes,this->output_ptrs,this->output_sizes);
-}
-
-void Sam2::set_boxes(std::vector<float> boxes)
-{
+void Sam2::sam2_infer(cv::Mat& img,std::vector<std::vector<float>>& boxes)
+{   this->boxes.clear();
     this->boxes=boxes;
+    auto start1 = std::chrono::high_resolution_clock::now();
+    this->output_ptrs.clear();
+    this->output_sizes.clear();
+    this->img_masks.clear();
+    this->ori_w=img.cols;
+    this->ori_h=img.rows;
+
+    this->encoder.process(img);
+ 
+    this->encoder.infer(this->output_ptrs,this->output_sizes);
+ 
+    bool muti=true;
+    for(int i=0;i<this->boxes.size();++i)
+    {
+        this->decoder.process(this->ori_w,this->ori_h,this->boxes[i],this->output_ptrs,this->output_sizes,muti);
+        this->decoder.infer();
+        this->img_masks.push_back(this->decoder.postprecess(this->ori_w,this->ori_h));
+        muti=false;
+    }
 }
 
-void Sam2::Sam2_decoder_infer()
+std::vector<cv::Mat> Sam2::sam2_getmasks()
 {
-    this->decoder.infer();
-}
-
-void Sam2::Sam2_decoder_postprocess()
-{
-    this->decoder.postprecess(this->ori_w,this->ori_w);
+    return this->img_masks;
 }

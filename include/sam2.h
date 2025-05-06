@@ -18,8 +18,8 @@ class Decoder{
     Decoder(){};
     ~Decoder();
     bool Decoder_init(std::string);
-    void process(int ori_w,int ori_h,std::vector<float> boxes,std::vector<void*>& output_ptrs, std::vector<size_t>& output_sizes);
-    cv::Mat postprecess(int ori_w,int ori_h);
+    void process(int ori_w,int ori_h,std::vector<float> boxes,std::vector<void*>& output_ptrs, std::vector<size_t>& output_sizes,bool muti);
+    cv::Mat postprecess(int &ori_w,int &ori_h);
     // cv::Mat postprocess(int ori_w,int ori_h,);
     bool infer();
     private:
@@ -31,6 +31,8 @@ class Decoder{
     std::vector<void*> bindings;
     std::vector<size_t> buffer_sizes;
     std::vector<std::vector<float>> output_data;
+    cv::Mat resized;
+     cv::Mat binary_mask;
 };
 
 class Encoder{
@@ -41,6 +43,7 @@ class Encoder{
     void process(cv::Mat& input_image);
     bool infer(std::vector<void*>& output_ptrs, std::vector<size_t>& output_sizes);
     private:
+    cv::Mat blob;
     Logger logger;
     nvinfer1::IRuntime* runtime ;
     nvinfer1::ICudaEngine* engine ;
@@ -52,18 +55,15 @@ class Encoder{
 class Sam2{
     public:
     Sam2(std::string encoder_path,std::string decoder_path);
-    void Sam2_encoder_process(cv::Mat& input_image);
-    void Sam2_encoder_infer();
-    void Sam2_decoder_process();
-    void set_boxes(std::vector<float> boxes);
-    void Sam2_decoder_infer();
-    void Sam2_decoder_postprocess();
+    void sam2_infer(cv::Mat &img,std::vector<std::vector<float>>&boxes);
+   std::vector<cv::Mat> sam2_getmasks();
     private:
     int ori_w,ori_h;
     std::vector<void*> output_ptrs;//encoder output
     std::vector<size_t> output_sizes;//encoder output_size
-    std::vector<float> boxes;
+    std::vector<std::vector<float>> boxes;
     Encoder encoder;
     Decoder decoder;
+    std::vector<cv::Mat> img_masks;
 };
 
